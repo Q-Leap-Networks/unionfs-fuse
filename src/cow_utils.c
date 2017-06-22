@@ -43,6 +43,7 @@
 #include <sys/stat.h>
 
 #include "unionfs.h"
+#include "branch_ops.h"
 #include "cow_utils.h"
 #include "debug.h"
 #include "general.h"
@@ -55,20 +56,23 @@
 /**
  * set the stat() data of a file
  **/
-int setfile(const char *path, struct stat *fs)
+int setfile(int branch, const char *path, struct stat *fs)
 {
 	DBG_IN();
 
-	struct utimbuf ut;
+	struct timespec times[2];
 	int rval;
 
 	rval = 0;
 	fs->st_mode &= S_ISUID | S_ISGID | S_IRWXU | S_IRWXG | S_IRWXO;
 
-	ut.actime  = fs->st_atime;
-	ut.modtime = fs->st_mtime;
-	if (utime(path, &ut)) {
-		usyslog(LOG_WARNING,   "utimes: %s", path);
+	times[0].tv_sec = fs->st_atime;
+	times[0].tv_nsec = 0;
+        times[1].tv_sec = fs->st_mtime;
+        times[1].tv_nsec = 0;
+
+	if (UTIMENS(times, branch, path)) {
+		usyslog(LOG_WARNING,   "utimens: %d %s", branch, path);
 		rval = 1;
 	}
 	/*
@@ -77,16 +81,16 @@ int setfile(const char *path, struct stat *fs)
 	* the mode; current BSD behavior is to remove all setuid bits on
 	* chown.  If chown fails, lose setuid/setgid bits.
 	*/
-	if (chown(path, fs->st_uid, fs->st_gid)) {
+	if (CHOWN(fs->st_uid, fs->st_gid, branch, path)) {
 		if (errno != EPERM) {
-			usyslog(LOG_WARNING,   "chown: %s", path);
+			usyslog(LOG_WARNING,   "chown: %d %s", branch, path);
 			rval = 1;
 		}
 		fs->st_mode &= ~(S_ISTXT | S_ISUID | S_ISGID);
 	}
 	
-	if (chmod(path, fs->st_mode)) {
-		usyslog(LOG_WARNING,   "chown: %s", path);
+	if (CHMOD(fs->st_mode, branch, path)) {
+		usyslog(LOG_WARNING,   "chown: %d %s", branch, path);
 		rval = 1;
 	}
 
@@ -99,27 +103,26 @@ int setfile(const char *path, struct stat *fs)
 		 * on a file that we copied, i.e., that we didn't create.)
 		 */
 		errno = 0;
-		if (chflags(path, fs->st_flags)) {
+		if (CHFLAGS(fs->st_flags, branch, path)) {
 			if (errno != EOPNOTSUPP || fs->st_flags != 0) {
-				usyslog(LOG_WARNING,   "chflags: %s", path);
+				usyslog(LOG_WARNING,   "chflags: %d %s", branch, path);
 				rval = 1;
 			}
-			return (rval);
 		}
 #endif
-	return 0;
+	return rval;
 }
 
 /**
  * set the stat() data of a link
  **/
-static int setlink(const char *path, struct stat *fs)
+static int setlink(int branch, const char *path, struct stat *fs)
 {
 	DBG_IN();
 
-	if (lchown(path, fs->st_uid, fs->st_gid)) {
+	if (LCHOWN(fs->st_uid, fs->st_gid, branch, path)) {
 		if (errno != EPERM) {
-			usyslog(LOG_WARNING,   "lchown: %s", path);
+			usyslog(LOG_WARNING,   "lchown: %d %s", branch, path);
 			return (1);
 		}
 	}
@@ -142,18 +145,19 @@ int copy_file(struct cow *cow)
 	char *p;
 #endif
 
-	if ((from_fd = open(cow->from_path, O_RDONLY, 0)) == -1) {
-		usyslog(LOG_WARNING, "%s", cow->from_path);
+	if ((from_fd = OPEN(O_RDONLY, 0, cow->from_branch, cow->from_path)) == -1) {
+		usyslog(LOG_WARNING, "%d %s", cow->from_branch, cow->from_path);
 		return (1);
 	}
 
 	fs = cow->stat;
 
-	to_fd = open(cow->to_path, O_WRONLY | O_TRUNC | O_CREAT,
-	             fs->st_mode & ~(S_ISTXT | S_ISUID | S_ISGID));
+	to_fd = OPEN(O_WRONLY | O_TRUNC | O_CREAT,
+	             fs->st_mode & ~(S_ISTXT | S_ISUID | S_ISGID),
+		     cow->to_branch, cow->to_path);
 
 	if (to_fd == -1) {
-		usyslog(LOG_WARNING, "%s", cow->to_path);
+		usyslog(LOG_WARNING, "%d %s", cow->to_branch, cow->to_path);
 		(void)close(from_fd);
 		return (1);
 	}
@@ -167,17 +171,17 @@ int copy_file(struct cow *cow)
 	if (fs->st_size > 0 && fs->st_size <= 8 * 1048576) {
 		if ((p = mmap(NULL, (size_t)fs->st_size, PROT_READ,
 		    MAP_FILE|MAP_SHARED, from_fd, (off_t)0)) == MAP_FAILED) {
-			usyslog(LOG_WARNING,   "mmap: %s", cow->from_path);
+			usyslog(LOG_WARNING,   "mmap: %d %s", cow->from_branch, cow->from_path);
 			rval = 1;
 		} else {
 			madvise(p, fs->st_size, MADV_SEQUENTIAL);
 			if (write(to_fd, p, fs->st_size) != fs->st_size) {
-				usyslog(LOG_WARNING,   "%s", cow->to_path);
+				usyslog(LOG_WARNING,   "%d %s", cow->to_branch, cow->to_path);
 				rval = 1;
 			}
 			/* Some systems don't unmap on close(2). */
 			if (munmap(p, fs->st_size) < 0) {
-				usyslog(LOG_WARNING,   "%s", cow->from_path);
+				usyslog(LOG_WARNING,   "%d %s", cow->from_branch, cow->from_path);
 				rval = 1;
 			}
 		}
@@ -187,13 +191,13 @@ int copy_file(struct cow *cow)
 		while ((rcount = read(from_fd, buf, MAXBSIZE)) > 0) {
 			wcount = write(to_fd, buf, rcount);
 			if (rcount != wcount || wcount == -1) {
-				usyslog(LOG_WARNING,   "%s", cow->to_path);
+				usyslog(LOG_WARNING,   "%d %s", cow->to_branch, cow->to_path);
 				rval = 1;
 				break;
 			}
 		}
 		if (rcount < 0) {
-			usyslog(LOG_WARNING,   "copy failed: %s", cow->from_path);
+			usyslog(LOG_WARNING,   "copy failed: %d %s", cow->from_branch, cow->from_path);
 			return 1;
 		}
 	}
@@ -204,7 +208,7 @@ int copy_file(struct cow *cow)
 		return (1);
 	}
 
-	if (setfile(cow->to_path, cow->stat))
+	if (setfile(cow->to_branch, cow->to_path, cow->stat))
 		rval = 1;
 	/*
 	 * If the source was setuid or setgid, lose the bits unless the
@@ -214,17 +218,17 @@ int copy_file(struct cow *cow)
 	(S_ISUID | S_ISGID | S_ISVTX | S_IRWXU | S_IRWXG | S_IRWXO)
 	else if (fs->st_mode & (S_ISUID | S_ISGID) && fs->st_uid == cow->uid) {
 		if (fstat(to_fd, &to_stat)) {
-			usyslog(LOG_WARNING,   "%s", cow->to_path);
+			usyslog(LOG_WARNING,   "%d %s", cow->to_branch, cow->to_path);
 			rval = 1;
 		} else if (fs->st_gid == to_stat.st_gid &&
 		    fchmod(to_fd, fs->st_mode & RETAINBITS & ~cow->umask)) {
-			usyslog(LOG_WARNING,   "%s", cow->to_path);
+			usyslog(LOG_WARNING,   "%d %s", cow->to_branch, cow->to_path);
 			rval = 1;
 		}
 	}
 	(void)close(from_fd);
 	if (close(to_fd)) {
-		usyslog(LOG_WARNING,   "%s", cow->to_path);
+		usyslog(LOG_WARNING,   "%d %s", cow->to_branch, cow->to_path);
 		rval = 1;
 	}
 	
@@ -241,19 +245,19 @@ int copy_link(struct cow *cow)
 	int len;
 	char link[PATHLEN_MAX];
 
-	if ((len = readlink(cow->from_path, link, sizeof(link)-1)) == -1) {
-		usyslog(LOG_WARNING,   "readlink: %s", cow->from_path);
+	if ((len = READLINK(link, sizeof(link)-1, cow->from_branch, cow->from_path)) == -1) {
+		usyslog(LOG_WARNING,   "readlink: %d %s", cow->from_branch, cow->from_path);
 		return (1);
 	}
 
 	link[len] = '\0';
 	
-	if (symlink(link, cow->to_path)) {
+	if (SYMLINK(link, cow->to_branch, cow->to_path)) {
 		usyslog(LOG_WARNING,   "symlink: %s", link);
 		return (1);
 	}
 	
-	return setlink(cow->to_path, cow->stat);
+	return setlink(cow->to_branch, cow->to_path, cow->stat);
 }
 
 /**
@@ -264,11 +268,11 @@ int copy_fifo(struct cow *cow)
 {
 	DBG_IN();
 
-	if (mkfifo(cow->to_path, cow->stat->st_mode)) {
-		usyslog(LOG_WARNING,   "mkfifo: %s", cow->to_path);
+	if (MKFIFO(cow->stat->st_mode, cow->to_branch, cow->to_path)) {
+		usyslog(LOG_WARNING,   "mkfifo: %d %s", cow->to_branch, cow->to_path);
 		return (1);
 	}
-	return setfile(cow->to_path, cow->stat);
+	return setfile(cow->to_branch, cow->to_path, cow->stat);
 }
 
 /**
@@ -279,9 +283,9 @@ int copy_special(struct cow *cow)
 {
 	DBG_IN();
 
-	if (mknod(cow->to_path, cow->stat->st_mode, cow->stat->st_rdev)) {
-		usyslog(LOG_WARNING,   "mknod: %s", cow->to_path);
+	if (MKNOD(cow->stat->st_mode, cow->stat->st_rdev, cow->to_branch, cow->to_path)) {
+		usyslog(LOG_WARNING,   "mknod: %d %s", cow->to_branch, cow->to_path);
 		return (1);
 	}
-	return setfile(cow->to_path, cow->stat);
+	return setfile(cow->to_branch, cow->to_path, cow->stat);
 }

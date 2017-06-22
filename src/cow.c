@@ -19,6 +19,7 @@
 
 #include "opts.h"
 #include "findbranch.h"
+#include "branch_ops.h"
 #include "general.h"
 #include "cow.h"
 #include "cow_utils.h"
@@ -32,11 +33,8 @@
 static int do_create(const char *path, int nbranch_ro, int nbranch_rw) {
 	DBG_IN();
 
-	char dirp[PATHLEN_MAX]; // dir path to create
-	sprintf(dirp, "%s%s", uopt.branches[nbranch_rw].path, path);
-
 	struct stat buf;
-	int res = stat(dirp, &buf);
+	int res = STAT(&buf, nbranch_rw, path);
 	if (res != -1) return 0; // already exists
 
 	if (nbranch_ro == nbranch_rw) {
@@ -45,21 +43,19 @@ static int do_create(const char *path, int nbranch_ro, int nbranch_rw) {
 		buf.st_mode = S_IRWXU | S_IRWXG;
 	} else {
 		// data from the ro-branch
-		char o_dirp[PATHLEN_MAX]; // the pathname we want to copy
-		sprintf(o_dirp, "%s%s", uopt.branches[nbranch_ro].path, path);
-		res = stat(o_dirp, &buf);
+		res = STAT(&buf, nbranch_ro, path);
 		if (res == -1) return 1; // lower level branch removed in the mean time?
 	}
 
-	res = mkdir(dirp, buf.st_mode);
+	res = MKDIR(buf.st_mode, nbranch_rw, path);
 	if (res == -1) {
-		usyslog(LOG_DAEMON, "Creating %s failed: \n", dirp);
+		usyslog(LOG_DAEMON, "Creating %d %s failed: \n", nbranch_rw, path);
 		return 1;
 	}
 
 	if (nbranch_ro == nbranch_rw) return 0; // the special case again
 
-	if (setfile(dirp, &buf))  return 1; // directory already removed by another process?
+	if (setfile(nbranch_rw, path, &buf))  return 1; // directory already removed by another process?
 
 	// TODO: time, but its values are modified by the next dir/file creation steps?
 
@@ -75,22 +71,16 @@ int path_create(const char *path, int nbranch_ro, int nbranch_rw) {
 
 	if (!uopt.cow_enabled) return 0;
 
-	if (strlen(path) + strlen(uopt.branches[nbranch_rw].path) > PATHLEN_MAX
-	|| strlen(path) + strlen(uopt.branches[nbranch_ro].path) > PATHLEN_MAX) {
-		// TODO: how to handle that?
-		return 1;
-	}
-
-	char p[PATHLEN_MAX];
-	snprintf(p, PATHLEN_MAX, "%s%s", uopt.branches[nbranch_rw].path, path);
-
 	struct stat st;
-	if (!stat(p, &st)) {
+	if (!STAT(&st, nbranch_rw, path)) {
 		// path does already exists, no need to create it
 		return 0;
 	}
 
-	char *walk = (char *)path;
+	char p[PATHLEN_MAX];
+	char *walk = p;
+	strncpy(p, path, PATHLEN_MAX - 1);
+	p[PATHLEN_MAX - 1] = '\0';
 
 	// first slashes, e.g. we have path = /dir1/dir2/, will set walk = dir1/dir2/
 	while (*walk != '\0' && *walk == '/') walk++;
@@ -99,10 +89,13 @@ int path_create(const char *path, int nbranch_ro, int nbranch_rw) {
 		// walk over the directory name, walk will now be /dir2
 		while (*walk != '\0' && *walk != '/') walk++;
 
-		// +1 due to \0, which gets added automatically
-		snprintf(p, (walk - path) + 1, "%s", path); // walk - path = strlen(/dir1)
+		// save '\0' or '/'
+		char c = *walk;
+		*walk = '\0';
 		int res = do_create(p, nbranch_ro, nbranch_rw);
 		if (res) return res; // creating the directory failed
+		// restore '\0' or '/'
+		*walk = c;
 
 		// as above the do loop, walk over the next slashes, walk = dir2/
 		while (*walk != '\0' && *walk == '/') walk++;
@@ -136,10 +129,6 @@ int cow_cp(const char *path, int branch_ro, int branch_rw) {
 	// create the path to the file
 	path_create_cutlast(path, branch_ro, branch_rw);
 
-	char from[PATHLEN_MAX], to[PATHLEN_MAX];
-	snprintf(from, PATHLEN_MAX, "%s%s", uopt.branches[branch_ro].path, path);
-	snprintf(to, PATHLEN_MAX, "%s%s", uopt.branches[branch_rw].path, path);
-
 	setlocale(LC_ALL, "");
 
 	struct cow cow;
@@ -150,14 +139,19 @@ int cow_cp(const char *path, int branch_ro, int branch_rw) {
 	cow.umask = umask(0);
 	umask(cow.umask);
 
-	cow.from_path = from;
-	cow.to_path = to;
+	cow.from_branch = branch_ro;
+	cow.from_path = path;
+	cow.to_branch = branch_rw;
+	cow.to_path = path;
 
 	struct stat buf;
-	lstat(cow.from_path, &buf);
+	int res = LSTAT(&buf, cow.from_branch, cow.from_path);
+	if (res != 0) {
+	  usyslog(LOG_WARNING,   "cow_cp: %s %d -> %d: file disapeared", path, branch_ro, branch_rw);
+	  return res;
+	}
 	cow.stat = &buf;
 
-	int res;
 	switch (buf.st_mode & S_IFMT) {
 		case S_IFLNK:
 			res = copy_link(&cow);
@@ -173,7 +167,7 @@ int cow_cp(const char *path, int branch_ro, int branch_rw) {
 			res = copy_fifo(&cow);
 			break;
 		case S_IFSOCK:
-			usyslog(LOG_WARNING, "COW of sockets not supported: %s\n", cow.from_path);
+			usyslog(LOG_WARNING, "COW of sockets not supported: %d %s\n", cow.from_branch cow.from_path);
 			return 1;
 		default:
 			res = copy_file(&cow);
@@ -194,24 +188,27 @@ int copy_directory(const char *path, int branch_ro, int branch_rw) {
 		return res;
 	}
 
-	/* determine path to source directory on read-only branch */
-	char from[PATHLEN_MAX];
-	if (BUILD_PATH(from, uopt.branches[branch_ro].path, path)) return 1;
+	/* space for path of directory plus file within */
+	char p[PATHLEN_MAX];
+	int len = snprintf(p, PATHLEN_MAX, "%s/", path);
+	char *q = p + len; // start of file name inside dir
 
-	DIR *dp = opendir(from);
+	DIR *dp = OPENDIR(branch_ro, path);
 	if (dp == NULL) return 1;
 
 	struct dirent *de;
 	while ((de = readdir(dp)) != NULL) {
 		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
 
-		char member[PATHLEN_MAX];
-		if (BUILD_PATH(member, path, de->d_name)) return 1;
-		res = cow_cp(member, branch_ro, branch_rw);
+		if (len + strlen(de->d_name) >= PATHLEN_MAX) {
+			errno = ENAMETOOLONG;
+			return 1;
+		}
+		strcpy(q, de->d_name);
+		res = cow_cp(p, branch_ro, branch_rw);
 		if (res != 0) return res;
 	}
 
 	closedir(dp);
 	return 0;
 }
-

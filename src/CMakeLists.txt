@@ -1,5 +1,5 @@
 set(HASHTABLE_SRCS hashtable.c hashtable_itr.c)
-set(UNIONFS_SRCS unionfs.c stats.c opts.c debug.c findbranch.c readdir.c general.c unlink.c cow.c cow_utils.c string.c rmdir.c)
+set(UNIONFS_SRCS unionfs.c stats.c opts.c debug.c findbranch.c branch_ops.c readdir.c general.c unlink.c cow.c cow_utils.c string.c rmdir.c)
 
 add_executable(unionfs ${UNIONFS_SRCS} ${HASHTABLE_SRCS})
 target_link_libraries(unionfs fuse pthread m rt)

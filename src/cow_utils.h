@@ -15,14 +15,16 @@ struct cow {
 	uid_t uid;
 
 	// source file
-	char  *from_path;
+	int from_branch;
+	const char  *from_path;
 	struct stat *stat;
 
 	// destination file
-	char *to_path;
+	int to_branch;
+	const char *to_path;
 };
 
-int setfile(const char *path, struct stat *fs);
+int setfile(int branch, const char *path, struct stat *fs);
 int copy_special(struct cow *cow);
 int copy_fifo(struct cow *cow);
 int copy_link(struct cow *cow);

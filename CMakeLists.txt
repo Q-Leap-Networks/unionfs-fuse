@@ -21,5 +21,10 @@ if(WITH_XATTR)
 	add_definitions(-DHAVE_SETXATTR)
 endif(WITH_XATTR)
 
+option(WITH_AT_FAMILY "Enable support for the *at family of calls")
+if(WITH_AT_FAMILY)
+	add_definitions(-DHAVE_AT_FAMILY)
+endif(WITH_AT_FAMILY)
+
 add_subdirectory(src)
 add_subdirectory(man)

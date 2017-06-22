@@ -41,6 +41,7 @@
 #include "stats.h"
 #include "debug.h"
 #include "findbranch.h"
+#include "branch_ops.h"
 #include "general.h"
 
 #include "unlink.h"
@@ -70,10 +71,7 @@ static int unionfs_chmod(const char *path, mode_t mode) {
 	int i = find_rw_branch_cow(path);
 	if (i == -1) return -errno;
 
-	char p[PATHLEN_MAX];
-	snprintf(p, PATHLEN_MAX, "%s%s", uopt.branches[i].path, path);
-
-	int res = chmod(p, mode);
+	int res = CHMOD(mode, i, path);
 	if (res == -1) return -errno;
 
 	return 0;
@@ -85,10 +83,7 @@ static int unionfs_chown(const char *path, uid_t uid, gid_t gid) {
 	int i = find_rw_branch_cow(path);
 	if (i == -1) return -errno;
 
-	char p[PATHLEN_MAX];
-	snprintf(p, PATHLEN_MAX, "%s%s", uopt.branches[i].path, path);
-
-	int res = lchown(p, uid, gid);
+	int res = LCHOWN(uid, gid, i, path);
 	if (res == -1) return -errno;
 
 	return 0;
@@ -104,17 +99,14 @@ static int unionfs_create(const char *path, mode_t mode, struct fuse_file_info *
 	int i = find_rw_branch_cutlast(path);
 	if (i == -1) return -errno;
 
-	char p[PATHLEN_MAX];
-	snprintf(p, PATHLEN_MAX, "%s%s", uopt.branches[i].path, path);
-
 	// NOTE: We should do:
 	//       Create the file with mode=0 first, otherwise we might create
 	//       a file as root + x-bit + suid bit set, which might be used for
 	//       security racing!
-	int res = open(p, fi->flags, 0);
+	int res = OPEN(fi->flags, 0, i, path);
 	if (res == -1) return -errno;
 
-	set_owner(p); // no error check, since creating the file succeeded
+	set_owner(path, i); // no error check, since creating the file succeeded
 
 	// NOW, that the file has the proper owner we may set the requested mode
 	fchmod(res, mode);
@@ -189,10 +181,7 @@ static int unionfs_getattr(const char *path, struct stat *stbuf) {
 	int i = find_rorw_branch(path);
 	if (i == -1) return -errno;
 
-	char p[PATHLEN_MAX];
-	snprintf(p, PATHLEN_MAX, "%s%s", uopt.branches[i].path, path);
-
-	int res = lstat(p, stbuf);
+	int res = LSTAT(stbuf, i, path);
 	if (res == -1) return -errno;
 
 	/* This is a workaround for broken gnu find implementations. Actually,
@@ -239,11 +228,7 @@ static int unionfs_link(const char *from, const char *to) {
 	int j = find_rw_branch_cutlast(to);
 	if (j == -1) return -errno;
 
-	char f[PATHLEN_MAX], t[PATHLEN_MAX];
-	snprintf(f, PATHLEN_MAX, "%s%s", uopt.branches[i].path, from);
-	snprintf(t, PATHLEN_MAX, "%s%s", uopt.branches[j].path, to);
-
-	int res = link(f, t);
+	int res = LINK(i, from, j, to);
 	if (res == -1) return -errno;
 
 	// no need for set_owner(), since owner and permissions are copied over by link()
@@ -264,15 +249,12 @@ static int unionfs_mkdir(const char *path, mode_t mode) {
 	int i = find_rw_branch_cutlast(path);
 	if (i == -1) return -errno;
 
-	char p[PATHLEN_MAX];
-	snprintf(p, PATHLEN_MAX, "%s%s", uopt.branches[i].path, path);
-
-	int res = mkdir(p, 0);
+	int res = MKDIR(0, i, path);
 	if (res == -1) return -errno;
 
-	set_owner(p); // no error check, since creating the file succeeded
+	set_owner(path, i); // no error check, since creating the file succeeded
         // NOW, that the file has the proper owner we may set the requested mode
-        chmod(p, mode);
+        CHMOD(mode, i, path);
 
 	return 0;
 }
@@ -282,9 +264,6 @@ static int unionfs_mknod(const char *path, mode_t mode, dev_t rdev) {
 
 	int i = find_rw_branch_cutlast(path);
 	if (i == -1) return -errno;
-
-	char p[PATHLEN_MAX];
-	snprintf(p, PATHLEN_MAX, "%s%s", uopt.branches[i].path, path);
 
 	int file_type = mode & S_IFMT;
 	int file_perm = mode & (S_PROT_MASK);
@@ -298,17 +277,17 @@ static int unionfs_mknod(const char *path, mode_t mode, dev_t rdev) {
 
 		usyslog (LOG_INFO, "deprecated mknod workaround, tell the unionfs-fuse authors if you see this!\n");
 
-		res = creat(p, 0);
+		res = CREAT(0, i, path);
 		if (res > 0 && close(res) == -1) usyslog(LOG_WARNING, "Warning, cannot close file\n");
 	} else {
-		res = mknod(p, file_type, rdev);
+	  res = MKNOD(file_type, rdev, i, path);
 	}
 
 	if (res == -1) return -errno;
 
-	set_owner(p); // no error check, since creating the file succeeded
+	set_owner(path, i); // no error check, since creating the file succeeded
 	// NOW, that the file has the proper owner we may set the requested mode
-	chmod(p, file_perm);
+	CHMOD(file_perm, i, path);
 
 	remove_hidden(path, i);
 
@@ -336,10 +315,7 @@ static int unionfs_open(const char *path, struct fuse_file_info *fi) {
 
 	if (i == -1) return -errno;
 
-	char p[PATHLEN_MAX];
-	snprintf(p, PATHLEN_MAX, "%s%s", uopt.branches[i].path, path);
-
-	int fd = open(p, fi->flags);
+	int fd = OPEN(fi->flags, 0, i, path);
 	if (fd == -1) return -errno;
 
 	if (fi->flags & (O_WRONLY | O_RDWR)) {
@@ -388,10 +364,7 @@ static int unionfs_readlink(const char *path, char *buf, size_t size) {
 	int i = find_rorw_branch(path);
 	if (i == -1) return -errno;
 
-	char p[PATHLEN_MAX];
-	snprintf(p, PATHLEN_MAX, "%s%s", uopt.branches[i].path, path);
-
-	int res = readlink(p, buf, size - 1);
+	int res = READLINK(buf, size - 1, i, path);
 
 	if (res == -1) return -errno;
 
@@ -418,40 +391,43 @@ static int unionfs_release(const char *path, struct fuse_file_info *fi) {
  */
 static int unionfs_rename(const char *from, const char *to) {
 	DBG_IN();
-
+fprintf(stderr, "### unionfs_rename(%s, %s)\n", from, to);
 	bool is_dir = false; // is 'from' a file or directory
 
 	int j = find_rw_branch_cutlast(to);
+fprintf(stderr, "  to rw branch = %d\n", j);
 	if (j == -1) return -errno;
 
 	int i = find_rorw_branch(from);
+fprintf(stderr, "  from rorw branch = %d\n", j);
 	if (i == -1) return -errno;
 
 	if (!uopt.branches[i].rw) {
 		i = find_rw_branch_cow(from);
+fprintf(stderr, "  from rw branch = %d\n", j);
 		if (i == -1) return -errno;
 	}
 
 	if (i != j) {
 		usyslog(LOG_ERR, "%s: from and to are on different writable branches %d vs %d, which"
 		       "is not supported yet.\n", __func__, i, j);
+fprintf(stderr, "  branch mismatch\n");
 		return -EXDEV;
 	}
 
-	char f[PATHLEN_MAX], t[PATHLEN_MAX];
-	snprintf(f, PATHLEN_MAX, "%s%s", uopt.branches[i].path, from);
-	snprintf(t, PATHLEN_MAX, "%s%s", uopt.branches[i].path, to);
-
-	filetype_t ftype = path_is_dir(f);
-	if (ftype == NOT_EXISTING)
+	filetype_t ftype = path_is_dir(i, from, NULL);
+	if (ftype == NOT_EXISTING) {
+fprintf(stderr, "### ENOENT\n");
 		return -ENOENT;
-	else if (ftype == IS_DIR)
+	} else if (ftype == IS_DIR) {
 		is_dir = true;
+	}
 
 	int res;
 	if (!uopt.branches[i].rw) {
 		// since original file is on a read-only branch, we copied the from file to a writable branch,
 		// but since we will rename from, we also need to hide the from file on the read-only branch
+fprintf(stderr, "  hide file\n");
 		if (is_dir)
 			res = hide_dir(from, i);
 		else
@@ -459,20 +435,25 @@ static int unionfs_rename(const char *from, const char *to) {
 		if (res) return -errno;
 	}
 
-	res = rename(f, t);
+fprintf(stderr, "  renaming\n");
+	res = RENAME(j, from, j, to);
+fprintf(stderr, "  renamed: %d\n", res);
 
 	if (res == -1) {
 		int err = errno; // unlink() might overwrite errno
 		// if from was on a read-only branch we copied it, but now rename failed so we need to delete it
 		if (!uopt.branches[i].rw) {
-			if (unlink(f))
+fprintf(stderr, "  unlink %s\n", from);
+			if (UNLINK(i, from))
 				usyslog(LOG_ERR, "%s: cow of %s succeeded, but rename() failed and now "
 				       "also unlink()  failed\n", __func__, from);
 
+fprintf(stderr, "  remove_hidden %s\n", from);
 			if (remove_hidden(from, i))
 				usyslog(LOG_ERR, "%s: cow of %s succeeded, but rename() failed and now "
 				       "also removing the whiteout  failed\n", __func__, from);
 		}
+fprintf(stderr, "### %d\n", -err);
 		return -err;
 	}
 
@@ -480,13 +461,16 @@ static int unionfs_rename(const char *from, const char *to) {
 		// A lower branch still *might* have a file called 'from', we need to delete this.
 		// We only need to do this if we have been on a rw-branch, since we created
 		// a whiteout for read-only branches anyway.
+fprintf(stderr, "  maybe_whiteout %s\n", from);
 		if (is_dir)
 			maybe_whiteout(from, i, WHITEOUT_DIR);
 		else
 			maybe_whiteout(from, i, WHITEOUT_FILE);
 	}
 
+fprintf(stderr, "  remove_hidden %s\n", to);
 	remove_hidden(to, i); // remove hide file (if any)
+fprintf(stderr, "### 0\n");
 	return 0;
 }
 
@@ -497,7 +481,7 @@ static int unionfs_rename(const char *from, const char *to) {
  * the filesystem itself again - which would result in a deadlock.
  * TODO: BSD/MacOSX
  */
-static int statvfs_local(const char *path, struct statvfs *stbuf) {
+static int statvfs_local(int branch, struct statvfs *stbuf) {
 #ifdef linux
 	/* glibc's statvfs walks /proc/mounts and stats entries found there
 	 * in order to extract their mount flags, which may deadlock if they
@@ -505,7 +489,7 @@ static int statvfs_local(const char *path, struct statvfs *stbuf) {
 	 * ourselves.
 	 */
 	struct statfs stfs;
-	int res = statfs(path, &stfs);
+	int res = STATFS(&stfs, branch);
 	if (res == -1) return res;
 
 	memset(stbuf, 0, sizeof(*stbuf));
@@ -532,7 +516,7 @@ static int statvfs_local(const char *path, struct statvfs *stbuf) {
 
 	return 0;
 #else
-	return statvfs(path, stbuf);
+	return STATVFS(stbuf, branch);
 #endif
 }
 
@@ -556,11 +540,11 @@ static int unionfs_statfs(const char *path, struct statvfs *stbuf) {
 	int i = 0;
 	for (i = 0; i < uopt.nbranches; i++) {
 		struct statvfs stb;
-		int res = statvfs_local(uopt.branches[i].path, &stb);
+		int res = statvfs_local(i, &stb);
 		if (res == -1) continue;
 
 		struct stat st;
-		res = stat(uopt.branches[i].path, &st);
+		res = STAT(&st, i, "/");
 		if (res == -1) continue;
 		devno[i] = st.st_dev;
 
@@ -617,13 +601,10 @@ static int unionfs_symlink(const char *from, const char *to) {
 	int i = find_rw_branch_cutlast(to);
 	if (i == -1) return -errno;
 
-	char t[PATHLEN_MAX];
-	snprintf(t, PATHLEN_MAX, "%s%s", uopt.branches[i].path, to);
-
-	int res = symlink(from, t);
+	int res = SYMLINK(from, i, to);
 	if (res == -1) return -errno;
 
-	set_owner(t); // no error check, since creating the file succeeded
+	set_owner(to, i); // no error check, since creating the file succeeded
 
 	remove_hidden(to, i); // remove hide file (if any)
 	return 0;
@@ -635,10 +616,7 @@ static int unionfs_truncate(const char *path, off_t size) {
 	int i = find_rw_branch_cow(path);
 	if (i == -1) return -errno;
 
-	char p[PATHLEN_MAX];
-	snprintf(p, PATHLEN_MAX, "%s%s", uopt.branches[i].path, path);
-
-	int res = truncate(p, size);
+	int res = TRUNCATE(size, i, path);
 
 	if (res == -1) return -errno;
 
@@ -653,17 +631,7 @@ static int unionfs_utimens(const char *path, const struct timespec ts[2]) {
 	int i = find_rw_branch_cow(path);
 	if (i == -1) return -errno;
 
-	char p[PATHLEN_MAX];
-	snprintf(p, PATHLEN_MAX, "%s%s", uopt.branches[i].path, path);
-
-	struct timeval tv[2];
-        tv[0].tv_sec  = ts[0].tv_sec;
-        tv[0].tv_usec = ts[0].tv_nsec / 1000;
-        tv[1].tv_sec  = ts[1].tv_sec;
-        tv[1].tv_usec = ts[1].tv_nsec / 1000;
-
-	int res = utimes(p, tv);
-
+	int res = UTIMENS(ts, i, path);
 	if (res == -1) return -errno;
 
 	return 0;
@@ -689,10 +657,7 @@ static int unionfs_getxattr(const char *path, const char *name, char *value, siz
 	int i = find_rorw_branch(path);
 	if (i == -1) return -errno;
 
-	char p[PATHLEN_MAX];
-	snprintf(p, PATHLEN_MAX, "%s%s", uopt.branches[i].path, path);
-
-	int res = lgetxattr(p, name, value, size);
+	int res = LGETXATTR(name, value, size, i, path);
 
 	if (res == -1) return -errno;
 
@@ -705,10 +670,7 @@ static int unionfs_listxattr(const char *path, char *list, size_t size) {
 	int i = find_rorw_branch(path);
 	if (i == -1) return -errno;
 
-	char p[PATHLEN_MAX];
-	snprintf(p, PATHLEN_MAX, "%s%s", uopt.branches[i].path, path);
-
-	int res = llistxattr(p, list, size);
+	int res = LLISTXATTR(list, size, i, path);
 
 	if (res == -1) return -errno;
 
@@ -721,10 +683,7 @@ static int unionfs_removexattr(const char *path, const char *name) {
 	int i = find_rw_branch_cow(path);
 	if (i == -1) return -errno;
 
-	char p[PATHLEN_MAX];
-	snprintf(p, PATHLEN_MAX, "%s%s", uopt.branches[i].path, path);
-
-	int res = lremovexattr(p, name);
+	int res = LREMOVEXATTR(name, i, path);
 
 	if (res == -1) return -errno;
 
@@ -737,10 +696,7 @@ static int unionfs_setxattr(const char *path, const char *name, const char *valu
 	int i = find_rw_branch_cow(path);
 	if (i == -1) return -errno;
 
-	char p[PATHLEN_MAX];
-	snprintf(p, PATHLEN_MAX, "%s%s", uopt.branches[i].path, path);
-
-	int res = lsetxattr(p, name, value, size, flags);
+	int res = LSETXATTR(name, value, size, flags, i, path);
 
 	if (res == -1) return -errno;
 

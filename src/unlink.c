@@ -28,6 +28,7 @@
 #include "cow.h"
 #include "general.h"
 #include "findbranch.h"
+#include "branch_ops.h"
 
 /**
   * If the branch that has the file to be unlinked is in read-only mode,
@@ -58,11 +59,8 @@ static int unlink_ro(const char *path, int branch_ro) {
   */
 static int unlink_rw(const char *path, int branch_rw) {
 	DBG_IN();
-	
-	char p[PATHLEN_MAX];
-	snprintf(p, PATHLEN_MAX, "%s%s", uopt.branches[branch_rw].path, path);
 
-	int res = unlink(p);
+	int res = UNLINK(branch_rw, path);
 	if (res == -1) return errno;
 
 	return 0;

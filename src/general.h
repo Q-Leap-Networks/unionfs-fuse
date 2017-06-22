@@ -25,9 +25,9 @@ bool path_hidden(const char *path, int branch);
 int remove_hidden(const char *path, int maxbranch);
 int hide_file(const char *path, int branch_rw);
 int hide_dir(const char *path, int branch_rw);
-filetype_t path_is_dir (const char *path);
+filetype_t path_is_dir (int branch, ...);
 int maybe_whiteout(const char *path, int branch_rw, enum whiteout mode);
-int set_owner(const char *path);
+int set_owner(const char *path, int branch);
 
 /**
  * Calling syslog() will deadlock if the filesystem is for /etc or /var.

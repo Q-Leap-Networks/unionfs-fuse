@@ -49,6 +49,7 @@
 #include "findbranch.h"
 #include "string.h"
 #include "debug.h"
+#include "branch_ops.h"
 
 /**
  *  Find a branch that has "path". Return the branch number.
@@ -58,13 +59,10 @@ static int find_branch(const char *path, searchflag_t flag) {
 
 	int i = 0;
 	for (i = 0; i < uopt.nbranches; i++) {
-		char p[PATHLEN_MAX];
-		snprintf(p, PATHLEN_MAX, "%s%s", uopt.branches[i].path, path);
-
 		struct stat stbuf;
-		int res = lstat(p, &stbuf);
+		int res = LSTAT(&stbuf, i, path);
 
-		DBG("%s: res = %d\n", p, res);
+		DBG("%d %s: res = %d\n", i, path, res);
 
 		if (res == 0) { // path was found
 			switch (flag) {

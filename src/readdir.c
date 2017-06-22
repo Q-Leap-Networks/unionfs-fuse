@@ -30,6 +30,7 @@
 #include "hashtable.h"
 #include "general.h"
 #include "string.h"
+#include "branch_ops.h"
 
 /**
  * Check if fname has a hiding tag and return its status.
@@ -64,10 +65,7 @@ static bool is_hiding(struct hashtable *hides, char *fname) {
 static void read_whiteouts(const char *path, struct hashtable *whiteouts, int branch) {
 	DBG_IN();
 
-	char p[PATHLEN_MAX];
-	if (BUILD_PATH(p, uopt.branches[branch].path, METADIR, path)) return;
-
-	DIR *dp = opendir(p);
+	DIR *dp = OPENDIR(branch, METADIR, path);
 	if (dp == NULL) return;
 
 	struct dirent *de;
@@ -100,13 +98,10 @@ int unionfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t o
 	for (i = 0; i < uopt.nbranches; i++) {
 		if (subdir_hidden) break;
 
-		char p[PATHLEN_MAX];
-		snprintf(p, PATHLEN_MAX, "%s%s", uopt.branches[i].path, path);
-
 		// check if branches below this branch are hidden
 		if (path_hidden(path, i)) subdir_hidden = true;
 
-		DIR *dp = opendir(p);
+		DIR *dp = OPENDIR(i, path);
 		if (dp == NULL) {
 			if (uopt.cow_enabled) read_whiteouts(path, whiteouts, i);
 			continue;

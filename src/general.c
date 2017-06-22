@@ -28,6 +28,7 @@
 #include "string.h"
 #include "cow.h"
 #include "findbranch.h"
+#include "branch_ops.h"
 #include "general.h"
 #include "debug.h"
 
@@ -35,17 +36,14 @@
 /**
  * Check if a file or directory with the hidden flag exists.
  */
-static bool filedir_hidden(const char *path) {
+static bool filedir_hidden(const char *path, int branch) {
 	DBG_IN();
 
 	// cow mode disabled, no need for hidden files
 	if (!uopt.cow_enabled) return false;
 	
-	char p[PATHLEN_MAX];
-	snprintf(p, PATHLEN_MAX, "%s%s", path, HIDETAG);
-
 	struct stat stbuf;
-	int res = lstat(p, &stbuf);
+	int res = LSTAT(&stbuf, branch, METADIR, path, HIDETAG);
 	if (res == 0) return true;
 
 	return false;
@@ -56,32 +54,24 @@ static bool filedir_hidden(const char *path) {
  */
 bool path_hidden(const char *path, int branch) {
 	DBG_IN();
-
 	if (!uopt.cow_enabled) return false;
 
-	char whiteoutpath[PATHLEN_MAX];
-	if (BUILD_PATH(whiteoutpath, uopt.branches[branch].path, METADIR, path)) return false;
-
-	char *walk = whiteoutpath;
+	char p[PATHLEN_MAX];
+	char *walk = p;
+	strcpy(p, path);
 
 	// first slashes, e.g. we have path = /dir1/dir2/, will set walk = dir1/dir2/
 	while (*walk != '\0' && *walk == '/') walk++;
 
-	bool first = true;
 	do {
 		// walk over the directory name, walk will now be /dir2
 		while (*walk != '\0' && *walk != '/') walk++;
-	
-		if (first) {
-			// first dir in path is our branch, no need to check if it is hidden
-			first = false;
-			continue;
-		}
-		// +1 due to \0, which gets added automatically
-		char p[PATHLEN_MAX];
-		snprintf(p, (walk - whiteoutpath) + 1, "%s", whiteoutpath); // walk - path = strlen(/dir1)
-		bool res = filedir_hidden(p);
+
+		const char c = *walk; // save '\0' or '/'
+		*walk = '\0';
+		bool res = filedir_hidden(p, branch);
 		if (res) return res; // path is hidden
+		*walk = c; // restore '\0' or '/'
 
 		// as above the do loop, walk over the next slashes, walk = dir2/
 		while (*walk != '\0' && *walk == '/') walk++;
@@ -103,12 +93,9 @@ int remove_hidden(const char *path, int maxbranch) {
 
 	int i;
 	for (i = 0; i <= maxbranch; i++) {
-		char p[PATHLEN_MAX];
-		if (BUILD_PATH(p, uopt.branches[i].path, METADIR, path, HIDETAG)) return 1;
-
-		switch (path_is_dir(p)) {
-			case IS_FILE: unlink(p); break;
-			case IS_DIR: rmdir(p); break;
+		switch (path_is_dir(i, METADIR, path, HIDETAG, NULL)) {
+			case IS_FILE: UNLINK(i, METADIR, path, HIDETAG); break;
+			case IS_DIR: RMDIR(i, METADIR, path, HIDETAG); break;
 			case NOT_EXISTING: continue;
 		}
 	}
@@ -121,12 +108,18 @@ int remove_hidden(const char *path, int maxbranch) {
  *
  * return proper types given by filetype_t
  */
-filetype_t path_is_dir(const char *path) {
+filetype_t path_is_dir(int branch, ...) {
 	DBG_IN();
 
+	va_list ap;
+	int res;
 	struct stat buf;
-	
-	if (lstat(path, &buf) == -1) return NOT_EXISTING;
+
+	va_start(ap, branch);
+	res = branch_va_lstat(&buf, branch, ap);
+	va_end(ap);
+
+	if (res == -1) return NOT_EXISTING;
 	
 	if (S_ISDIR(buf.st_mode)) return IS_DIR;
 	
@@ -147,16 +140,13 @@ static int do_create_whiteout(const char *path, int branch_rw, enum whiteout mod
 	// this creates e.g. branch/.unionfs/some_directory
 	path_create_cutlast(metapath, branch_rw, branch_rw);
 
-	char p[PATHLEN_MAX];
-	if (BUILD_PATH(p, uopt.branches[branch_rw].path, metapath, HIDETAG)) return -1;
-
 	int res;
 	if (mode == WHITEOUT_FILE) {
-		res = open(p, O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR);
+		res = OPEN(O_WRONLY | O_CREAT, S_IRUSR | S_IWUSR, branch_rw, metapath, HIDETAG);
 		if (res == -1) return -1;
 		res = close(res);
 	} else {
-		res = mkdir(p, S_IRWXU);
+		res = MKDIR(S_IRWXU, branch_rw, metapath, HIDETAG);
 	}
 
 	return res;
@@ -196,10 +186,10 @@ int maybe_whiteout(const char *path, int branch_rw, enum whiteout mode) {
 /**
  * Set file owner of after an operation, which created a file.
  */
-int set_owner(const char *path) {
+int set_owner(const char *path, int branch) {
 	struct fuse_context *ctx = fuse_get_context();
 	if (ctx->uid != 0 && ctx->gid != 0) {
-		int res = lchown(path, ctx->uid, ctx->gid);
+		int res = LCHOWN(ctx->uid, ctx->gid, branch, path);
 		if (res) {
 			usyslog(LOG_WARNING,
 			       ":%s: Setting the correct file owner failed: %s !\n", 
