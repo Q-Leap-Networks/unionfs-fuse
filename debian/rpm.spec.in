@@ -1,0 +1,49 @@
+%global srcname unionfs-fuse
+%global sum Fuse implementation of unionfs
+
+Name:           %{srcname}
+Version:        %%%UPSTREAMVERS%%%
+Release:        %%%QLVERS%%%
+Summary:        %{sum}
+Vendor:         NSC
+
+Group:          Development/Languages
+License:        BSD-3 (modified)
+URL:            https://github.com/rpodgorny/unionfs-fuse
+Source0:        https://github.com/rpodgorny/unionfs-fuse/%{name}-%{version}.tar.xz
+
+BuildRequires: cmake, fuse-devel
+
+%description
+This is another unionfs implementation using filesystem in 
+userspace (fuse).
+
+%prep
+#QUILT_PATCHES=debian/patches quilt --quiltrc /dev/null push -a
+mkdir -p _build
+cd _build && cmake ../ -DCMAKE_INSTALL_PREFIX=/usr \
+	               -DCMAKE_C_FLAGS="-pipe -W -Wall -g -O2" \
+	               -DCMAKE_SKIP_RPATH=TRUE \
+		       -DWITH_XATTR=TRUE
+
+%build
+cd _build && make
+
+%install
+cd _build && make DESTDIR=%{buildroot} install
+ 
+%clean
+rm -rf _build
+
+%files
+%license LICENSE
+%doc CREDITS
+%doc NEWS
+%doc README.md
+/usr/share/man/man8/unionfs.8.gz
+/usr/bin/unionfs
+/usr/bin/unionfsctl
+
+%changelog
+* Thu Jun 22 2017 Goswin von Brederlow <brederlo@q-leap.de> - 2.0-0+ql.1
+- build rpm
